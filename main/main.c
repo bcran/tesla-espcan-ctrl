@@ -22,16 +22,11 @@ static const char* TAG = "CANDueMain";
 
 uint32_t bthandle = 0;
 
-static esp_bd_addr_t photon_btpeer = {0x00, 0x22, 0xec, 0x05, 0x9d, 0xe5}; /* Photon */
-static esp_bd_addr_t imx6_btpeer = {0x00, 0x22, 0xEC, 0x05, 0x98, 0xD0};
+static esp_bd_addr_t photon_btpeer = {0x00, 0x22, 0xec, 0x05, 0x9d, 0xe5}; // Photon desktop
+static esp_bd_addr_t imx6_btpeer = {0x00, 0x22, 0xEC, 0x05, 0x98, 0xD0};   // i.MX6 Sololite EVK
 
 
 void process_can_msg(can_message_t *msg);
-
-esp_err_t event_handler(void *ctx, system_event_t *event)
-{
-    return ESP_OK;
-}
 
 void verify_bluetooth_peer(esp_bd_addr_t bda)
 {
@@ -47,6 +42,7 @@ void verify_bluetooth_peer(esp_bd_addr_t bda)
 void sppcb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 {
 	esp_err_t ret;
+	const uint8_t *bda;
 
 	switch (event)
 	{
@@ -58,6 +54,8 @@ void sppcb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 		ret = esp_spp_start_srv(ESP_SPP_SEC_AUTHENTICATE, ESP_SPP_ROLE_MASTER, 0, "ESP32CANDueSPP");
 		ESP_ERROR_CHECK(ret);
 		ESP_LOGI(TAG, "Initialized Bluetooth®");
+		bda = esp_bt_dev_get_address();
+		ESP_LOGI(TAG, "Controller address is %02x:%02x:%02x:%02x:%02x:%02x", bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
 		break;
 	case ESP_SPP_DISCOVERY_COMP_EVT:
 		ESP_LOGI(TAG, "SPP Discovery complete");
