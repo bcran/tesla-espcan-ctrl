@@ -1,34 +1,75 @@
+/*
+ * Copyright (C) 2020 Rebecca Cran <rebecca@bsdio.com>.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. The name of the author may not be used to endorse or promote products
+ *    derived from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR
+ * TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+ * USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
 #include <string.h>
 
-#include "freertos/FreeRTOS.h"
-#include "esp_bt.h"
-#include "esp_system.h"
-#include "esp_gap_bt_api.h"
-#include "esp_spp_api.h"
-#include "esp_bt_main.h"
-#include "esp_bt_device.h"
-#include "esp_event.h"
-#include "nvs_flash.h"
-#include "driver/gpio.h"
-#include "driver/can.h"
-#include "driver/adc.h"
-#include "driver/i2c.h"
+#include <esp_bt.h>
+#include <esp_system.h>
+#include <esp_gap_bt_api.h>
+#include <esp_spp_api.h>
+#include <esp_bt_main.h>
+#include <esp_bt_device.h>
+#include <esp_event.h>
+#include <nvs_flash.h>
+#include <driver/gpio.h>
+#include <driver/can.h>
+#include <driver/adc.h>
+#include <driver/i2c.h>
+#include <esp_log.h>
 
 #include "model3_can.h"
 
-#include "esp_log.h"
-
-static const char* TAG = "CANDueMain";
+static const char* TAG = "CANdue";
 
 uint32_t bthandle = 0;
 
+#define ADXL345_ADDR 0x53
+#define ADXL345_DEVID 0xE5
+
+struct msgheader
+{
+	uint32_t identifier;
+	uint32_t size;
+};
+
+
 static esp_bd_addr_t photon_btpeer = {0x00, 0x22, 0xec, 0x05, 0x9d, 0xe5}; // Photon desktop
-static esp_bd_addr_t imx6_btpeer = {0x00, 0x22, 0xEC, 0x05, 0x98, 0xD0};   // i.MX6 Sololite EVK
+static esp_bd_addr_t imx6_btpeer   = {0x00, 0x22, 0xEC, 0x05, 0x98, 0xD0}; // i.MX6 Sololite EVK
+
+static void verify_bluetooth_peer(esp_bd_addr_t bda);
+static void candue_bt_spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param);
+static void candue_bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
+static void candue_setup_bluetooth(void);
+static void candue_setup_i2c(void);
+static void send_msg_to_btpeer(int id, int len, void *data);
+static void process_can_msg(can_message_t *msg);
 
 
-void process_can_msg(can_message_t *msg);
-
-void verify_bluetooth_peer(esp_bd_addr_t bda)
+// Only allow specific devices to connect to the ESP32 board
+static void verify_bluetooth_peer(esp_bd_addr_t bda)
 {
 	if (memcmp(bda, photon_btpeer, sizeof(esp_bd_addr_t)) != 0 &&
 		memcmp(bda, imx6_btpeer, sizeof(esp_bd_addr_t)) != 0) {
@@ -39,7 +80,7 @@ void verify_bluetooth_peer(esp_bd_addr_t bda)
 	}
 }
 
-void sppcb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
+static void candue_bt_spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 {
 	esp_err_t ret;
 	const uint8_t *bda;
@@ -96,7 +137,7 @@ void sppcb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 
 }
 
-void gapcb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
+static void candue_bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 {
 	switch (event) {
 		case ESP_BT_GAP_AUTH_CMPL_EVT:
@@ -124,25 +165,13 @@ void gapcb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 	}
 }
 
-void i2c_intr(void *param)
-{
-
-}
-
-#define ADXL345_ADDR 0x53
-#define ADXL345_DEVID 0xE5
-
-void app_main(void)
+static void candue_setup_bluetooth(void)
 {
 	esp_err_t ret;
 
-	ret = nvs_flash_init();
-	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NOT_FOUND) {
-		ESP_ERROR_CHECK(ret);
-	}
-
 	ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
 
+	// Set up the Bluetooth stack
 	esp_bt_controller_config_t btcfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
 	ret = esp_bt_controller_init(&btcfg);
 	ESP_ERROR_CHECK(ret);
@@ -153,26 +182,17 @@ void app_main(void)
 	ESP_ERROR_CHECK(ret);
 	ret = esp_bluedroid_enable();
 	ESP_ERROR_CHECK(ret);
-	ret = esp_bt_gap_register_callback(gapcb);
+	ret = esp_bt_gap_register_callback(candue_bt_gap_callback);
 	ESP_ERROR_CHECK(ret);
-	ret = esp_spp_register_callback(sppcb);
+	ret = esp_spp_register_callback(candue_bt_spp_callback);
 	ESP_ERROR_CHECK(ret);
 	ret = esp_spp_init(ESP_SPP_MODE_CB);
 	ESP_ERROR_CHECK(ret);
+}
 
-	// Tx is GPIO 17 and Rx GPIO 18 on the ESP32 CANDue V2
-	can_general_config_t g_config = CAN_GENERAL_CONFIG_DEFAULT(GPIO_NUM_17, GPIO_NUM_16, CAN_MODE_LISTEN_ONLY);
-	can_timing_config_t t_config = CAN_TIMING_CONFIG_500KBITS();
-	can_filter_config_t f_config = CAN_FILTER_CONFIG_ACCEPT_ALL();
-
-	ret = can_driver_install(&g_config, &t_config, &f_config);
-	ESP_ERROR_CHECK(ret);
-	ret = can_start();
-	ESP_ERROR_CHECK(ret);
-
-	// ADC1 CH5 is connected to the ESP32 CANDue ADC0 input, which contains a Analog Devices TMP36 temperature sensor
-	adc1_config_width(ADC_WIDTH_BIT_12);
-	adc1_config_channel_atten(ADC1_CHANNEL_5, ADC_ATTEN_DB_6);
+static void candue_setup_i2c(void)
+{
+	esp_err_t ret;
 
 	/* Set up the I2C master */
 	i2c_config_t i2c;
@@ -213,6 +233,35 @@ void app_main(void)
 		ESP_LOGE(TAG, "ERROR: ADXL345 not found");
 		while (1) { sleep(60); }
 	}
+}
+
+void app_main(void)
+{
+	esp_err_t ret;
+
+	ret = nvs_flash_init();
+	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NOT_FOUND) {
+		ESP_ERROR_CHECK(ret);
+	}
+
+	candue_setup_bluetooth();
+
+	// Configure the CAN transceiver
+	// Tx is GPIO 17 and Rx GPIO 18 on the ESP32 CANDue V2
+	can_general_config_t g_config = CAN_GENERAL_CONFIG_DEFAULT(GPIO_NUM_17, GPIO_NUM_16, CAN_MODE_LISTEN_ONLY);
+	can_timing_config_t t_config = CAN_TIMING_CONFIG_500KBITS();
+	can_filter_config_t f_config = CAN_FILTER_CONFIG_ACCEPT_ALL();
+
+	ret = can_driver_install(&g_config, &t_config, &f_config);
+	ESP_ERROR_CHECK(ret);
+	ret = can_start();
+	ESP_ERROR_CHECK(ret);
+
+	// ADC1 CH5 is connected to the ESP32 CANDue ADC0 input, which contains a Analog Devices TMP36 temperature sensor
+	adc1_config_width(ADC_WIDTH_BIT_12);
+	adc1_config_channel_atten(ADC1_CHANNEL_5, ADC_ATTEN_DB_6);
+
+	candue_setup_i2c();
 
 	ESP_LOGI(TAG, "Initialized. Running.");
 
@@ -232,16 +281,9 @@ void app_main(void)
 		else
 			ESP_LOGE(TAG, "CAN: err %d", ret);
 	}
-
 }
 
-struct msgheader
-{
-	uint32_t identifier;
-	uint32_t size;
-};
-
-void send_msg_to_btpeer(int id, int len, void *data)
+static void send_msg_to_btpeer(int id, int len, void *data)
 {
 	esp_err_t ret;
 	struct msgheader hdr;
@@ -253,7 +295,7 @@ void send_msg_to_btpeer(int id, int len, void *data)
 	esp_spp_write(bthandle, len, (uint8_t*)data);
 }
 
-void process_can_msg(can_message_t *msg)
+static void process_can_msg(can_message_t *msg)
 {
 	struct model3_can_id257_u_ispeed_t speed;
 	struct model3_can_id528_unix_time_t time;
