@@ -7,4 +7,4 @@ set(COMPONENT_ADD_INCLUDEDIRS "")
 
 register_component()
 
-target_compile_options(${COMPONENT_TARGET} PRIVATE -Wall)
+target_compile_options(${COMPONENT_TARGET} PRIVATE -Wall -Wstrict-prototypes)

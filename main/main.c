@@ -25,6 +25,7 @@
  */
 
 #include <string.h>
+#include <unistd.h>
 
 #include <esp_bt.h>
 #include <esp_system.h>
@@ -169,8 +170,6 @@ static void candue_setup_bluetooth(void)
 {
 	esp_err_t ret;
 
-	ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
-
 	// Set up the Bluetooth stack
 	esp_bt_controller_config_t btcfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
 	ret = esp_bt_controller_init(&btcfg);
@@ -188,6 +187,11 @@ static void candue_setup_bluetooth(void)
 	ESP_ERROR_CHECK(ret);
 	ret = esp_spp_init(ESP_SPP_MODE_CB);
 	ESP_ERROR_CHECK(ret);
+
+	// Configure authentication for no input no output
+	esp_bt_io_cap_t mode = ESP_BT_IO_CAP_NONE;
+	esp_bt_gap_set_security_param(ESP_BT_SP_IOCAP_MODE, &mode, sizeof(mode));
+
 }
 
 static void candue_setup_i2c(void)
