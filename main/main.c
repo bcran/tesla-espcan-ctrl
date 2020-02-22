@@ -33,6 +33,17 @@ esp_err_t event_handler(void *ctx, system_event_t *event)
     return ESP_OK;
 }
 
+void verify_bluetooth_peer(esp_bd_addr_t bda)
+{
+	if (memcmp(bda, photon_btpeer, sizeof(esp_bd_addr_t)) != 0 &&
+		memcmp(bda, imx6_btpeer, sizeof(esp_bd_addr_t)) != 0) {
+		ESP_LOGE(TAG, "Unauthorized Bluetooth® peer attempted to connect");
+		esp_bt_gap_remove_bond_device(bda);
+		esp_bt_controller_deinit();
+		esp_restart();
+	}
+}
+
 void sppcb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 {
 	esp_err_t ret;
@@ -46,7 +57,7 @@ void sppcb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 		ESP_ERROR_CHECK(ret);
 		ret = esp_spp_start_srv(ESP_SPP_SEC_AUTHENTICATE, ESP_SPP_ROLE_MASTER, 0, "ESP32CANDueSPP");
 		ESP_ERROR_CHECK(ret);
-		ESP_LOGI(TAG, "Initialized Bluetooth\n");
+		ESP_LOGI(TAG, "Initialized Bluetooth®");
 		break;
 	case ESP_SPP_DISCOVERY_COMP_EVT:
 		ESP_LOGI(TAG, "SPP Discovery complete");
@@ -57,11 +68,10 @@ void sppcb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 		bthandle = param->open.handle;
 		break;
 	case ESP_SPP_CLOSE_EVT:
-		ESP_LOGI(TAG, "SPP CLOSE");
+		ESP_LOGI(TAG, "Bluetooth® peer disconnected");
 		bthandle = 0;
 		break;
 	case ESP_SPP_START_EVT:
-		ESP_LOGI(TAG, "SPP START");
 		break;
 	case ESP_SPP_CL_INIT_EVT:
 		ESP_LOGI(TAG, "SPP CL INIT");
@@ -77,10 +87,12 @@ void sppcb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 		ESP_LOGI(TAG, "WRITE");
 		break;
 	case ESP_SPP_SRV_OPEN_EVT:
-		ESP_LOGI(TAG, "OPEN SRV EVT");
+		ESP_LOGI(TAG, "Bluetooth® peer connected");
+		verify_bluetooth_peer(param->srv_open.rem_bda);
+		bthandle = param->srv_open.handle;
 		break;
 	default:
-		ESP_LOGI(TAG, "Unhandled SPP event %d", event);
+		ESP_LOGW(TAG, "Unhandled SPP event %d", event);
 		break;
 	}
 
@@ -89,45 +101,28 @@ void sppcb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 void gapcb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 {
 	switch (event) {
-	case ESP_BT_GAP_AUTH_CMPL_EVT:
-		if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS)
-		{
-			ESP_LOGI(TAG, "Authentication successful: %s\n", param->auth_cmpl.device_name);
-			esp_log_buffer_hex(TAG, param->auth_cmpl.bda, ESP_BD_ADDR_LEN);
-			if (memcmp(param->auth_cmpl.bda, photon_btpeer, sizeof(param->auth_cmpl.bda)) != 0 &&
-				memcmp(param->auth_cmpl.bda, imx6_btpeer, sizeof(param->auth_cmpl.bda)) != 0) {
-				ESP_LOGE(TAG, "Unauthorized Bluetooth Peer attempted to connect");
-				esp_bt_gap_remove_bond_device(param->auth_cmpl.bda);
-				esp_bt_controller_deinit();
-				esp_restart();
+		case ESP_BT_GAP_AUTH_CMPL_EVT:
+			if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS)
+			{
+				verify_bluetooth_peer(param->auth_cmpl.bda);
+			} else {
+				ESP_LOGW(TAG, "Authentication failed: %d\n", param->auth_cmpl.stat);
 			}
 
-		} else {
-			ESP_LOGI(TAG, "Authentication failed: %d\n", param->auth_cmpl.stat);
-		}
+			/* Set GPIO0 low, to enable bootloader mode on reset
+				gpio_set_level(0, 0);
+				esp_restart();
+			*/
+			break;
 
-		/* Set GPIO0 low, to enable bootloader mode on reset */
-//		gpio_set_level(0, 0);
-//		esp_restart();
-		break;
-
-	case ESP_BT_GAP_PIN_REQ_EVT:
-		ESP_LOGI(TAG, "PIN REQ EVT\n");
-		break;
-	case ESP_BT_GAP_CFM_REQ_EVT:
-		ESP_LOGI(TAG, "Please compare PIN code %d\n", param->cfm_req.num_val);
-		esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
-		break;
-	case ESP_BT_GAP_KEY_NOTIF_EVT:
-		ESP_LOGI(TAG, "GAP Key: %d\n", param->key_notif.passkey);
-		break;
-	case ESP_BT_GAP_KEY_REQ_EVT:
-		ESP_LOGI(TAG, "Passkey requested\n");
-		break;
-	case ESP_BT_GAP_CONFIG_EIR_DATA_EVT:
-		break;
-	default:
-		ESP_LOGI(TAG, "Unknown GAP callback event %d\n", event);
+		case ESP_BT_GAP_PIN_REQ_EVT:
+		case ESP_BT_GAP_CFM_REQ_EVT:
+		case ESP_BT_GAP_KEY_NOTIF_EVT:
+		case ESP_BT_GAP_KEY_REQ_EVT:
+		case ESP_BT_GAP_CONFIG_EIR_DATA_EVT:
+			break;
+		default:
+			ESP_LOGW(TAG, "Unknown GAP callback event %d", event);
 	}
 }
 
@@ -142,20 +137,6 @@ void i2c_intr(void *param)
 void app_main(void)
 {
 	esp_err_t ret;
-#if 0
-    gpio_config_t io_conf;
-    //disable interrupt
-    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
-    //set as output mode
-    io_conf.mode = GPIO_MODE_OUTPUT;
-    //bit mask of the pins that you want to set,e.g.GPIO18/19
-    io_conf.pin_bit_mask = 1;
-    //disable pull-down mode
-    io_conf.pull_down_en = 0;
-    //disable pull-up mode
-    io_conf.pull_up_en = 0;
-    gpio_config(&io_conf);
-#endif
 
 	ret = nvs_flash_init();
 	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NOT_FOUND) {
@@ -180,8 +161,6 @@ void app_main(void)
 	ESP_ERROR_CHECK(ret);
 	ret = esp_spp_init(ESP_SPP_MODE_CB);
 	ESP_ERROR_CHECK(ret);
-	esp_bt_io_cap_t cap = ESP_BT_IO_CAP_IO;
-	ret = esp_bt_gap_set_security_param(ESP_BT_SP_IOCAP_MODE, &cap, sizeof(uint8_t));
 
 	// Tx is GPIO 17 and Rx GPIO 18 on the ESP32 CANDue V2
 	can_general_config_t g_config = CAN_GENERAL_CONFIG_DEFAULT(GPIO_NUM_17, GPIO_NUM_16, CAN_MODE_LISTEN_ONLY);
@@ -233,11 +212,11 @@ void app_main(void)
 
 	if (data != ADXL345_DEVID)
 	{
-		printf("ERROR: ADXL345 not found\n");
+		ESP_LOGE(TAG, "ERROR: ADXL345 not found");
 		while (1) { sleep(60); }
 	}
 
-	printf("Initialized. Running program.\n");
+	ESP_LOGI(TAG, "Initialized. Running.");
 
 	can_message_t msg;
 	while (1) {
@@ -247,13 +226,13 @@ void app_main(void)
 			process_can_msg(&msg);
 		}
 		else if (ret == ESP_ERR_TIMEOUT)
-			printf("rx tmo\n");
+			continue;
 		else if (ret == ESP_ERR_INVALID_ARG)
-			printf("rx arg\n");
+			ESP_LOGE(TAG, "CAN: invalid argument");
 		else if (ret == ESP_ERR_INVALID_STATE)
-			printf("CAN driver na\n");
+			ESP_LOGE(TAG, "CAN: invalid state");
 		else
-			printf("CAN err %d\n", ret);
+			ESP_LOGE(TAG, "CAN: err %d", ret);
 	}
 
 }
@@ -264,6 +243,18 @@ struct msgheader
 	uint32_t size;
 };
 
+void send_msg_to_btpeer(int id, int len, void *data)
+{
+	esp_err_t ret;
+	struct msgheader hdr;
+	hdr.identifier = id;
+	hdr.size = sizeof(hdr) + len;
+
+	ret = esp_spp_write(bthandle, sizeof(hdr), (uint8_t*)&hdr);
+	ESP_ERROR_CHECK(ret);
+	esp_spp_write(bthandle, len, (uint8_t*)data);
+}
+
 void process_can_msg(can_message_t *msg)
 {
 	struct model3_can_id257_u_ispeed_t speed;
@@ -273,48 +264,42 @@ void process_can_msg(can_message_t *msg)
 	struct model3_can_id352_bm_senergy_t kwh;
 	struct model3_can_id118_drive_system_status_t drivesystem;
 
-	struct msgheader hdr;
-	hdr.identifier = msg->identifier;
-
-	int ret;
+	int ret = true;
 	switch (msg->identifier)
 	{
 	case MODEL3_CAN_ID257_U_ISPEED_FRAME_ID:
 		ret = model3_can_id257_u_ispeed_unpack(&speed, msg->data, msg->data_length_code);
-		hdr.size = sizeof(hdr) + sizeof(speed);
-		esp_spp_write(bthandle, sizeof(hdr), (uint8_t*)&hdr);
-		esp_spp_write(bthandle, sizeof(speed), (uint8_t*)&speed);
+		if (ret)
+			send_msg_to_btpeer(msg->identifier, sizeof(speed), &speed);
 		break;
 	case MODEL3_CAN_ID528_UNIX_TIME_FRAME_ID:
 		ret = model3_can_id528_unix_time_unpack(&time, msg->data, msg->data_length_code);
-		hdr.size = sizeof(hdr) + sizeof(time);
-		esp_spp_write(bthandle, sizeof(hdr), (uint8_t*)&hdr);
-		esp_spp_write(bthandle, sizeof(time), (uint8_t*)&time);
+		if (ret)
+			send_msg_to_btpeer(msg->identifier, sizeof(time), &time);
 		break;
 	case MODEL3_CAN_ID2_D2_BMSV_ALIMITS_FRAME_ID:
 		ret = model3_can_id2_d2_bmsv_alimits_unpack(&bmsv, msg->data, msg->data_length_code);
-		hdr.size = sizeof(hdr) + sizeof(bmsv);
-		esp_spp_write(bthandle, sizeof(hdr), (uint8_t*)&hdr);
-		esp_spp_write(bthandle, sizeof(bmsv), (uint8_t*)&bmsv);
+		if (ret)
+			send_msg_to_btpeer(msg->identifier, sizeof(bmsv), &bmsv);
 		break;
 	case MODEL3_CAN_ID3_D8_ELEVATION_FRAME_ID:
 		ret = model3_can_id3_d8_elevation_unpack(&elevation, msg->data, msg->data_length_code);
-		hdr.size = sizeof(hdr) + sizeof(elevation);
-		esp_spp_write(bthandle, sizeof(hdr), (uint8_t*)&hdr);
-		esp_spp_write(bthandle, sizeof(elevation), (uint8_t*)&elevation);
+		if (ret)
+			send_msg_to_btpeer(msg->identifier, sizeof(elevation), &elevation);
 		break;
 	case MODEL3_CAN_ID352_BM_SENERGY_FRAME_ID:
 		ret = model3_can_id352_bm_senergy_unpack(&kwh, msg->data, msg->data_length_code);
-		hdr.size = sizeof(hdr) + sizeof(kwh);
-		esp_spp_write(bthandle, sizeof(hdr), (uint8_t*)&hdr);
-		esp_spp_write(bthandle, sizeof(kwh), (uint8_t*)&kwh);
+		if (ret)
+			send_msg_to_btpeer(msg->identifier, sizeof(kwh), &kwh);
 		break;
 	case MODEL3_CAN_ID118_DRIVE_SYSTEM_STATUS_FRAME_ID:
 		ret = model3_can_id118_drive_system_status_unpack(&drivesystem, msg->data, msg->data_length_code);
-		hdr.size = sizeof(hdr) + sizeof(drivesystem);
-		esp_spp_write(bthandle, sizeof(hdr), (uint8_t*)&hdr);
-		esp_spp_write(bthandle, sizeof(drivesystem), (uint8_t*)&drivesystem);
+		if (ret)
+			send_msg_to_btpeer(msg->identifier, sizeof(drivesystem), &drivesystem);
 	}
+
+	if (!ret)
+		ESP_LOGE(TAG, "error occurred unpacking CAN data");
 
 	float temperature = (((adc1_get_raw(ADC1_CHANNEL_5) / 4095) * 2000) - 500) * 0.1;
 	(void)temperature;
