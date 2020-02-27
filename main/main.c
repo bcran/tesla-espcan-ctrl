@@ -42,18 +42,31 @@
 #include <esp_log.h>
 
 #include "model3_can.h"
+#include "adxl345.h"
 
 static const char* TAG = "CANdue";
 
 uint32_t bthandle = 0;
 
-#define ADXL345_ADDR 0x53
-#define ADXL345_DEVID 0xE5
+enum TESLADAT_TYPE
+{
+	TESLADAT_UNKNOWN = 0,
+	TESLADAT_SPEED = 1,
+	TESLADAT_ELEVATION = 2,
+	TESLADATA_KWH = 3,
+	TESLADAT_TIME = 4
+};
 
 struct msgheader
 {
+	uint32_t magic;
+	uint32_t len;
 	uint32_t identifier;
-	uint32_t size;
+};
+
+struct tesladat_intmsg
+{
+	int value;
 };
 
 
@@ -64,8 +77,7 @@ static void verify_bluetooth_peer(esp_bd_addr_t bda);
 static void candue_bt_spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param);
 static void candue_bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
 static void candue_setup_bluetooth(void);
-static void candue_setup_i2c(void);
-static void send_msg_to_btpeer(int id, int len, void *data);
+static void send_msg_to_btpeer(int id, int len, int val);
 static void process_can_msg(can_message_t *msg);
 
 
@@ -81,10 +93,41 @@ static void verify_bluetooth_peer(esp_bd_addr_t bda)
 	}
 }
 
+bool btpeer_connected = false;
+
+void cantask(void)
+{
+	esp_err_t ret;
+
+	can_message_t msg;
+	while (1) {
+		ret = can_receive(&msg, pdMS_TO_TICKS(500));
+
+		if (!btpeer_connected)
+			continue;
+
+		if (ret == ESP_OK) {
+			process_can_msg(&msg);
+		}
+		else if (ret == ESP_ERR_TIMEOUT)
+			ESP_LOGW(TAG, "CAN: rx timeout");
+		else if (ret == ESP_ERR_INVALID_ARG)
+			ESP_LOGE(TAG, "CAN: invalid argument");
+		else if (ret == ESP_ERR_INVALID_STATE)
+			ESP_LOGE(TAG, "CAN: invalid state");
+		else
+			ESP_LOGE(TAG, "CAN: err %d", ret);
+
+		// send accelerometer data
+	//	send_msg_to_btpeer(TESLACAN_TEMP, 4, 4);
+	}
+}
+
 static void candue_bt_spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 {
 	esp_err_t ret;
 	const uint8_t *bda;
+//	TaskHandle_t xHandle = NULL;
 
 	switch (event)
 	{
@@ -110,6 +153,7 @@ static void candue_bt_spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t 
 	case ESP_SPP_CLOSE_EVT:
 		ESP_LOGI(TAG, "Bluetooth® peer disconnected");
 		bthandle = 0;
+		btpeer_connected = false;
 		break;
 	case ESP_SPP_START_EVT:
 		break;
@@ -124,12 +168,12 @@ static void candue_bt_spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t 
 		ESP_LOGI(TAG, "CONG");
 		break;
 	case ESP_SPP_WRITE_EVT:
-		ESP_LOGI(TAG, "WRITE");
 		break;
 	case ESP_SPP_SRV_OPEN_EVT:
 		ESP_LOGI(TAG, "Bluetooth® peer connected");
 		verify_bluetooth_peer(param->srv_open.rem_bda);
 		bthandle = param->srv_open.handle;
+		btpeer_connected = true;
 		break;
 	default:
 		ESP_LOGW(TAG, "Unhandled SPP event %d", event);
@@ -194,50 +238,6 @@ static void candue_setup_bluetooth(void)
 
 }
 
-static void candue_setup_i2c(void)
-{
-	esp_err_t ret;
-
-	/* Set up the I2C master */
-	i2c_config_t i2c;
-	i2c.mode = I2C_MODE_MASTER;
-	i2c.scl_io_num =GPIO_NUM_22;
-	i2c.sda_io_num = GPIO_NUM_21;
-	i2c.scl_pullup_en = GPIO_PULLUP_ENABLE;
-	i2c.sda_pullup_en = GPIO_PULLUP_ENABLE;
-	i2c.master.clk_speed = 100000; /* 100 kHz */
-	ret = i2c_param_config(I2C_NUM_0, &i2c);
-	ESP_ERROR_CHECK(ret);
-	ret = i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0);
-	ESP_ERROR_CHECK(ret);
-
-	/* Check that we have an accelerometer installed */
-	i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-	unsigned char data = 0;
-	ret = i2c_master_start(cmd);
-	ESP_ERROR_CHECK(ret);
-	ret = i2c_master_write_byte(cmd, (ADXL345_ADDR << 1) | I2C_MASTER_WRITE, true);
-	ESP_ERROR_CHECK(ret);
-	ret = i2c_master_write_byte(cmd, 0, true);
-	ESP_ERROR_CHECK(ret);
-	ret = i2c_master_start(cmd);
-	ESP_ERROR_CHECK(ret);
-	ret = i2c_master_write_byte(cmd, (ADXL345_ADDR << 1) | I2C_MASTER_READ, true);
-	ESP_ERROR_CHECK(ret);
-	ret = i2c_master_read_byte(cmd, &data, true);
-	ESP_ERROR_CHECK(ret);
-	ret = i2c_master_stop(cmd);
-	ESP_ERROR_CHECK(ret);
-	ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, 1000);
-	ESP_ERROR_CHECK(ret);
-	i2c_cmd_link_delete(cmd);
-
-	if (data != ADXL345_DEVID)
-	{
-		ESP_LOGE(TAG, "ERROR: ADXL345 not found");
-		while (1) { sleep(60); }
-	}
-}
 
 void app_main(void)
 {
@@ -265,38 +265,21 @@ void app_main(void)
 	adc1_config_width(ADC_WIDTH_BIT_12);
 	adc1_config_channel_atten(ADC1_CHANNEL_5, ADC_ATTEN_DB_6);
 
-	candue_setup_i2c();
+	adxl345_setup_i2c();
 
 	ESP_LOGI(TAG, "Initialized. Running.");
-
-	can_message_t msg;
-	while (1) {
-		ret = can_receive(&msg, pdMS_TO_TICKS(10000));
-
-		if (ret == ESP_OK) {
-			process_can_msg(&msg);
-		}
-		else if (ret == ESP_ERR_TIMEOUT)
-			continue;
-		else if (ret == ESP_ERR_INVALID_ARG)
-			ESP_LOGE(TAG, "CAN: invalid argument");
-		else if (ret == ESP_ERR_INVALID_STATE)
-			ESP_LOGE(TAG, "CAN: invalid state");
-		else
-			ESP_LOGE(TAG, "CAN: err %d", ret);
-	}
+	cantask();
 }
 
-static void send_msg_to_btpeer(int id, int len, void *data)
+static void send_msg_to_btpeer(int id, int len, int val)
 {
 	esp_err_t ret;
-	struct msgheader hdr;
-	hdr.identifier = id;
-	hdr.size = sizeof(hdr) + len;
 
-	ret = esp_spp_write(bthandle, sizeof(hdr), (uint8_t*)&hdr);
+	int hdrdata[3] = {0x7E31ADA7, id, len};
+
+	ret = esp_spp_write(bthandle, sizeof(int) * 3, (uint8_t*)hdrdata);
 	ESP_ERROR_CHECK(ret);
-	esp_spp_write(bthandle, len, (uint8_t*)data);
+	esp_spp_write(bthandle, len, (uint8_t*)&val);
 }
 
 static void process_can_msg(can_message_t *msg)
@@ -308,41 +291,45 @@ static void process_can_msg(can_message_t *msg)
 	struct model3_can_id352_bm_senergy_t kwh;
 	struct model3_can_id118_drive_system_status_t drivesystem;
 
-	int ret = true;
+	int ret = 0;
 	switch (msg->identifier)
 	{
 	case MODEL3_CAN_ID257_U_ISPEED_FRAME_ID:
-		ret = model3_can_id257_u_ispeed_unpack(&speed, msg->data, msg->data_length_code);
-		if (ret)
-			send_msg_to_btpeer(msg->identifier, sizeof(speed), &speed);
+		ret = model3_can_id257_u_ispeed_unpack(&speed, msg->data, sizeof(speed));
+		ESP_LOGI(TAG, "Processing speed message");
+		if (ret == 0)
+			send_msg_to_btpeer(TESLADAT_SPEED, sizeof(speed.u_ispeed_signed257), (int)speed.u_ispeed_signed257);
 		break;
 	case MODEL3_CAN_ID528_UNIX_TIME_FRAME_ID:
-		ret = model3_can_id528_unix_time_unpack(&time, msg->data, msg->data_length_code);
-		if (ret)
-			send_msg_to_btpeer(msg->identifier, sizeof(time), &time);
+		ret = model3_can_id528_unix_time_unpack(&time, msg->data, sizeof(time));
+		if (ret == 0)
+			send_msg_to_btpeer(TESLADAT_TIME, sizeof(int), (int)time.unix_time_seconds528);
 		break;
 	case MODEL3_CAN_ID2_D2_BMSV_ALIMITS_FRAME_ID:
-		ret = model3_can_id2_d2_bmsv_alimits_unpack(&bmsv, msg->data, msg->data_length_code);
-		if (ret)
-			send_msg_to_btpeer(msg->identifier, sizeof(bmsv), &bmsv);
+	//	ret = model3_can_id2_d2_bmsv_alimits_unpack(&bmsv, msg->data, msg->data_length_code);
+	//	if (ret)
+	//		send_msg_to_btpeer(msg->identifier, sizeof(bmsv), &bmsv);
 		break;
 	case MODEL3_CAN_ID3_D8_ELEVATION_FRAME_ID:
-		ret = model3_can_id3_d8_elevation_unpack(&elevation, msg->data, msg->data_length_code);
-		if (ret)
-			send_msg_to_btpeer(msg->identifier, sizeof(elevation), &elevation);
+		// Add 4 to the size to make the unpack function happy
+		ESP_LOGI(TAG, "sizeof(elevation) == %d", sizeof(elevation) + 4);
+		ret = model3_can_id3_d8_elevation_unpack(&elevation, msg->data, sizeof(elevation));
+		if (ret == 0)
+			send_msg_to_btpeer(TESLADAT_ELEVATION, sizeof(int), (int)elevation.elevation3_d8);
 		break;
 	case MODEL3_CAN_ID352_BM_SENERGY_FRAME_ID:
-		ret = model3_can_id352_bm_senergy_unpack(&kwh, msg->data, msg->data_length_code);
-		if (ret)
-			send_msg_to_btpeer(msg->identifier, sizeof(kwh), &kwh);
+		ret = model3_can_id352_bm_senergy_unpack(&kwh, msg->data, sizeof(kwh));
+		if (ret == 0)
+			send_msg_to_btpeer(TESLADATA_KWH, sizeof(int), (int)kwh.bremaining_k_wh_nom352);
 		break;
 	case MODEL3_CAN_ID118_DRIVE_SYSTEM_STATUS_FRAME_ID:
-		ret = model3_can_id118_drive_system_status_unpack(&drivesystem, msg->data, msg->data_length_code);
-		if (ret)
-			send_msg_to_btpeer(msg->identifier, sizeof(drivesystem), &drivesystem);
+//		ret = model3_can_id118_drive_system_status_unpack(&drivesystem, msg->data, msg->data_length_code);
+//		if (ret)
+//			send_msg_to_btpeer(msg->identifier, sizeof(drivesystem), &drivesystem);
+		break;
 	}
 
-	if (!ret)
+	if (ret != 0)
 		ESP_LOGE(TAG, "error occurred unpacking CAN data");
 
 	float temperature = (((adc1_get_raw(ADC1_CHANNEL_5) / 4095) * 2000) - 500) * 0.1;

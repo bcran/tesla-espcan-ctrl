@@ -2,7 +2,7 @@
 set(COMPONENT_REQUIRES )
 set(COMPONENT_PRIV_REQUIRES )
 
-set(COMPONENT_SRCS "main.c" "model3_can.c")
+set(COMPONENT_SRCS "main.c" "adxl345.c" "model3_can.c")
 set(COMPONENT_ADD_INCLUDEDIRS "")
 
 register_component()
