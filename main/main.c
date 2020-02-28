@@ -41,6 +41,8 @@
 #include <driver/i2c.h>
 #include <esp_log.h>
 
+#include <esp_adc_cal.h>
+
 #include "model3_can.h"
 #include "adxl345.h"
 
@@ -69,6 +71,8 @@ struct tesladat_intmsg
 	int value;
 };
 
+esp_adc_cal_characteristics_t *adc_chars;
+
 
 static esp_bd_addr_t photon_btpeer = {0x00, 0x22, 0xec, 0x05, 0x9d, 0xe5}; // Photon desktop
 static esp_bd_addr_t imx6_btpeer   = {0x00, 0x22, 0xEC, 0x05, 0x98, 0xD0}; // i.MX6 Sololite EVK
@@ -79,6 +83,7 @@ static void candue_bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_pa
 static void candue_setup_bluetooth(void);
 static void send_msg_to_btpeer(int id, int len, int val);
 static void process_can_msg(can_message_t *msg);
+static double get_tmp36_temperature(void);
 
 
 // Only allow specific devices to connect to the ESP32 board
@@ -118,8 +123,7 @@ void cantask(void)
 		else
 			ESP_LOGE(TAG, "CAN: err %d", ret);
 
-		// send accelerometer data
-	//	send_msg_to_btpeer(TESLACAN_TEMP, 4, 4);
+		//float temperature = get_tmp36_temperature();
 	}
 }
 
@@ -238,6 +242,17 @@ static void candue_setup_bluetooth(void)
 
 }
 
+static double get_tmp36_temperature(void)
+{
+	uint32_t raw, millivolts;
+
+	raw = adc1_get_raw(ADC1_CHANNEL_5);
+	millivolts = esp_adc_cal_raw_to_voltage(raw, adc_chars);
+
+	double temperature = (millivolts - 500) / 10.0;
+	return temperature;
+}
+
 
 void app_main(void)
 {
@@ -262,12 +277,20 @@ void app_main(void)
 	ESP_ERROR_CHECK(ret);
 
 	// ADC1 CH5 is connected to the ESP32 CANDue ADC0 input, which contains a Analog Devices TMP36 temperature sensor
+	// https://www.analog.com/media/en/technical-documentation/data-sheets/TMP35_36_37.pdf
+
 	adc1_config_width(ADC_WIDTH_BIT_12);
 	adc1_config_channel_atten(ADC1_CHANNEL_5, ADC_ATTEN_DB_6);
+
+    // eFuse value obtained by `espefuse.py --port /dev/ttyUSB1 adc_info`
+	const int ADC_VREF_CALIBRATION = 1121; // mV
+	adc_chars = calloc(1, sizeof(esp_adc_cal_characteristics_t));
+	esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_6, ADC_WIDTH_BIT_12, ADC_VREF_CALIBRATION, adc_chars);
 
 	adxl345_setup_i2c();
 
 	ESP_LOGI(TAG, "Initialized. Running.");
+	printf("TMP: %f\n", get_tmp36_temperature());
 	cantask();
 }
 
@@ -331,7 +354,4 @@ static void process_can_msg(can_message_t *msg)
 
 	if (ret != 0)
 		ESP_LOGE(TAG, "error occurred unpacking CAN data");
-
-	float temperature = (((adc1_get_raw(ADC1_CHANNEL_5) / 4095) * 2000) - 500) * 0.1;
-	(void)temperature;
 }
