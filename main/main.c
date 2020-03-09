@@ -284,8 +284,8 @@ void app_main(void)
 	adc1_config_width(ADC_WIDTH_BIT_12);
 	adc1_config_channel_atten(ADC1_CHANNEL_5, ADC_ATTEN_DB_6);
 
-    // eFuse value obtained by `espefuse.py --port /dev/ttyUSB1 adc_info`
-	const int ADC_VREF_CALIBRATION = 1121; // mV
+	// eFuse value obtained by `espefuse.py --port /dev/ttyUSB0 adc_info`
+	const int ADC_VREF_CALIBRATION = 1086; // mV
 	adc_chars = calloc(1, sizeof(esp_adc_cal_characteristics_t));
 	esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_6, ADC_WIDTH_BIT_12, ADC_VREF_CALIBRATION, adc_chars);
 
