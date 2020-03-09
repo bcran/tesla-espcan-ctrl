@@ -56,7 +56,9 @@ enum TESLADAT_TYPE
 	TESLADAT_SPEED = 1,
 	TESLADAT_ELEVATION = 2,
 	TESLADATA_KWH = 3,
-	TESLADAT_TIME = 4
+	TESLADAT_TIME = 4,
+	TESLADATA_SOC = 5,
+	TESLADAT_DRIVESTATUS = 6
 };
 
 struct msgheader
@@ -81,7 +83,7 @@ static void verify_bluetooth_peer(esp_bd_addr_t bda);
 static void candue_bt_spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param);
 static void candue_bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
 static void candue_setup_bluetooth(void);
-static void send_msg_to_btpeer(int id, int len, int val);
+static void send_msg_to_btpeer(int id, int len, void *data);
 static void process_can_msg(can_message_t *msg);
 static double get_tmp36_temperature(void);
 
@@ -287,71 +289,66 @@ void app_main(void)
 	adc_chars = calloc(1, sizeof(esp_adc_cal_characteristics_t));
 	esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_6, ADC_WIDTH_BIT_12, ADC_VREF_CALIBRATION, adc_chars);
 
-	adxl345_setup_i2c();
+	// adxl345_setup_i2c();
 
 	ESP_LOGI(TAG, "Initialized. Running.");
-	printf("TMP: %f\n", get_tmp36_temperature());
 	cantask();
 }
 
-static void send_msg_to_btpeer(int id, int len, int val)
+static void send_msg_to_btpeer(int id, int len, void *data)
 {
 	esp_err_t ret;
 
 	int hdrdata[3] = {0x7E31ADA7, id, len};
 
-	ret = esp_spp_write(bthandle, sizeof(int) * 3, (uint8_t*)hdrdata);
+	ret = esp_spp_write(bthandle, sizeof(hdrdata), (uint8_t*)hdrdata);
 	ESP_ERROR_CHECK(ret);
-	esp_spp_write(bthandle, len, (uint8_t*)&val);
+	ret = esp_spp_write(bthandle, len, data);
+	ESP_ERROR_CHECK(ret);
 }
 
 static void process_can_msg(can_message_t *msg)
 {
 	struct model3_can_id257_u_ispeed_t speed;
 	struct model3_can_id528_unix_time_t time;
-	struct model3_can_id2_d2_bmsv_alimits_t bmsv;
 	struct model3_can_id3_d8_elevation_t elevation;
-	struct model3_can_id352_bm_senergy_t kwh;
 	struct model3_can_id118_drive_system_status_t drivesystem;
+	struct model3_can_id292_bms_soc_t soc;
 
 	int ret = 0;
 	switch (msg->identifier)
 	{
 	case MODEL3_CAN_ID257_U_ISPEED_FRAME_ID:
 		ret = model3_can_id257_u_ispeed_unpack(&speed, msg->data, sizeof(speed));
-		ESP_LOGI(TAG, "Processing speed message");
 		if (ret == 0)
-			send_msg_to_btpeer(TESLADAT_SPEED, sizeof(speed.u_ispeed_signed257), (int)speed.u_ispeed_signed257);
+			send_msg_to_btpeer(TESLADAT_SPEED, sizeof(speed.u_ispeed_signed257), &speed.u_ispeed_signed257);
 		break;
 	case MODEL3_CAN_ID528_UNIX_TIME_FRAME_ID:
 		ret = model3_can_id528_unix_time_unpack(&time, msg->data, sizeof(time));
 		if (ret == 0)
-			send_msg_to_btpeer(TESLADAT_TIME, sizeof(int), (int)time.unix_time_seconds528);
-		break;
-	case MODEL3_CAN_ID2_D2_BMSV_ALIMITS_FRAME_ID:
-	//	ret = model3_can_id2_d2_bmsv_alimits_unpack(&bmsv, msg->data, msg->data_length_code);
-	//	if (ret)
-	//		send_msg_to_btpeer(msg->identifier, sizeof(bmsv), &bmsv);
+			send_msg_to_btpeer(TESLADAT_TIME, sizeof(time.unix_time_seconds528), &time.unix_time_seconds528);
 		break;
 	case MODEL3_CAN_ID3_D8_ELEVATION_FRAME_ID:
-		// Add 4 to the size to make the unpack function happy
-		ESP_LOGI(TAG, "sizeof(elevation) == %d", sizeof(elevation) + 4);
 		ret = model3_can_id3_d8_elevation_unpack(&elevation, msg->data, sizeof(elevation));
 		if (ret == 0)
-			send_msg_to_btpeer(TESLADAT_ELEVATION, sizeof(int), (int)elevation.elevation3_d8);
-		break;
-	case MODEL3_CAN_ID352_BM_SENERGY_FRAME_ID:
-		ret = model3_can_id352_bm_senergy_unpack(&kwh, msg->data, sizeof(kwh));
-		if (ret == 0)
-			send_msg_to_btpeer(TESLADATA_KWH, sizeof(int), (int)kwh.bremaining_k_wh_nom352);
+			send_msg_to_btpeer(TESLADAT_ELEVATION, sizeof(elevation.elevation3_d8), &elevation.elevation3_d8);
 		break;
 	case MODEL3_CAN_ID118_DRIVE_SYSTEM_STATUS_FRAME_ID:
-//		ret = model3_can_id118_drive_system_status_unpack(&drivesystem, msg->data, msg->data_length_code);
-//		if (ret)
-//			send_msg_to_btpeer(msg->identifier, sizeof(drivesystem), &drivesystem);
+		ret = model3_can_id118_drive_system_status_unpack(&drivesystem, msg->data, msg->data_length_code);
+		if (ret) {
+			uint8_t data[] = {drivesystem.pedal_position118, drivesystem.brake_state118};
+			send_msg_to_btpeer(TESLADAT_DRIVESTATUS, 2*sizeof(uint8_t), data);
+		}
+		break;
+	case MODEL3_CAN_ID292_BMS_SOC_FRAME_ID:
+		ret = model3_can_id292_bms_soc_unpack(&soc, msg->data, sizeof(soc));
+		if (ret == 0) {
+			uint16_t data[] = {soc.socui292};
+			send_msg_to_btpeer(TESLADATA_SOC, 1*sizeof(uint16_t), data);
+		}
 		break;
 	}
 
 	if (ret != 0)
-		ESP_LOGE(TAG, "error occurred unpacking CAN data");
+		ESP_LOGE(TAG, "Error occurred unpacking CAN data (ID=%d)", msg->identifier);
 }
